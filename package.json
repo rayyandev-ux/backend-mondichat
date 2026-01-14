@@ -1,0 +1,40 @@
+{
+  "name": "backend-mondichat",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@fastify/cors": "^11.2.0",
+    "@fastify/helmet": "^13.0.2",
+    "@fastify/jwt": "^10.0.0",
+    "@fastify/multipart": "^9.3.0",
+    "@fastify/rate-limit": "^10.3.0",
+    "@prisma/client": "^5.22.0",
+    "@types/node": "^25.0.8",
+    "argon2": "^0.44.0",
+    "bullmq": "^5.66.5",
+    "csv-parse": "^6.1.0",
+    "dotenv": "^17.2.3",
+    "fastify": "^5.6.2",
+    "groq-sdk": "^0.37.0",
+    "ioredis": "^5.9.1",
+    "openai": "^6.16.0",
+    "prisma": "^5.22.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3",
+    "zod": "^4.3.5"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0"
+  }
+}

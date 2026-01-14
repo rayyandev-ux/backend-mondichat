@@ -1,0 +1,60 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id               String   @id @default(uuid())
+  email            String   @unique
+  name             String?
+  password         String
+  role             String   @default("user") // admin, user
+  dni              String?
+  phone            String?
+  route            String?  // MDJ001
+  registrationCode String?
+  whatsappId       String?  @unique // +51999999999
+  verificationCode String?  // #Mondi-XXXX
+  reports          Report[]
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model RouteData {
+  id         String   @id @default(uuid())
+  routeCode  String   // MDJ001
+  clientCode String?
+  clientName String?
+  visitDay   String?
+  data       Json     // Flexible column storage (KIWE_Kx2, etc.)
+  batchId    String   // To track uploads
+  uploadedAt DateTime @default(now())
+  
+  @@index([routeCode])
+}
+
+model Report {
+  id        String   @id @default(uuid())
+  content   String
+  status    String   @default("pending") // pending, resolved
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model RegistrationCode {
+  id             String   @id @default(uuid())
+  code           String   @unique
+  isUsed         Boolean  @default(false)
+  usedByUserId   String?
+  usedByUserName String?
+  createdAt      DateTime @default(now())
+}
