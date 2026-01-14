@@ -1,0 +1,8 @@
+node_modules
+dist
+.env
+.git
+*.log
+Dockerfile
+.dockerignore
+Db-Proyecto-MondiChat-Rayyan.csv
