@@ -51,6 +51,7 @@ export async function transcribeAudio(audioUrl: string): Promise<string> {
 const conversationHistory = new Map<string, Array<{role: 'user' | 'assistant', content: string}>>();
 
 export async function processUserQuery(userId: string, query: string, userName: string): Promise<string> {
+    console.log(`[AI-AGENT] Processing query for ${userName} (${userId}): "${query}"`);
     try {
         // 1. Get User Route
         const user = await prisma.user.findUnique({

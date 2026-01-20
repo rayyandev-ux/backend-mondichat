@@ -95,8 +95,10 @@ export async function webhookRoutes(server: FastifyInstance) {
       
       // Extract text content or audio
       let text = '';
+      let isAudio = false;
 
       if (messageData.message?.audioMessage?.url) {
+          isAudio = true;
           try {
               request.log.info({ msg: 'Audio detected, transcribing...' });
               text = await transcribeAudio(messageData.message.audioMessage.url);
@@ -111,7 +113,13 @@ export async function webhookRoutes(server: FastifyInstance) {
 
       text = text.trim();
 
-      if (!text) return reply.status(200).send('ok');
+      if (!text) {
+          if (isAudio) {
+               // Audio failed to transcribe
+               await sendWazendMessage(phoneNumber, "⚠️ Lo siento, no pude entender el audio. Por favor intenta enviarlo de nuevo o escribe tu mensaje.");
+          }
+          return reply.status(200).send('ok');
+      }
 
       // 1. Linking Logic (#Mondi-XXXX)
       if (text.startsWith('#Mondi-')) {
@@ -126,6 +134,7 @@ export async function webhookRoutes(server: FastifyInstance) {
 
       if (user) {
         // Forward to AI Agent for RAG/Query
+        request.log.info({ msg: 'Forwarding to AI Agent', userId: user.id, query: text });
         const response = await processUserQuery(user.id, text, user.name || 'Vendedor');
         await sendWazendMessage(phoneNumber, response);
       } else {
