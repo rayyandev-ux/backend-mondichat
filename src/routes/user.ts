@@ -24,4 +24,26 @@ export async function userRoutes(server: FastifyInstance) {
       return reply.status(500).send({ error: "Error generating code" });
     }
   });
+
+  // Get current user profile
+  server.get('/user/me', {
+    preValidation: [server.authenticate]
+  }, async (request: any, reply) => {
+    try {
+      const user = await prisma.user.findUnique({
+        where: { email: request.user.email }
+      });
+      
+      if (!user) {
+        return reply.status(404).send({ error: "Usuario no encontrado" });
+      }
+
+      // Exclude password
+      const { password, ...userProfile } = user;
+      return userProfile;
+    } catch (error) {
+      request.log.error(error);
+      return reply.status(500).send({ error: "Error fetching profile" });
+    }
+  });
 }

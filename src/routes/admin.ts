@@ -108,4 +108,29 @@ export async function adminRoutes(server: FastifyInstance) {
         return reply.status(500).send({ error: "Error al eliminar usuario" });
     }
   });
+
+  server.post('/admin/users/:id/unlink', {
+    preValidation: [server.authenticate]
+  }, async (request: any, reply) => {
+    // Check if requester is admin
+    const requesterRole = request.user.role;
+    if (requesterRole !== 'admin') {
+        return reply.status(403).send({ error: "No autorizado" });
+    }
+
+    try {
+        const { id } = request.params as { id: string };
+        await prisma.user.update({
+            where: { id },
+            data: {
+                whatsappId: null,
+                verificationCode: null
+            }
+        });
+        return { success: true };
+    } catch (error) {
+        request.log.error(error);
+        return reply.status(500).send({ error: "Error unlinking user" });
+    }
+  });
 }

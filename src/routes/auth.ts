@@ -99,14 +99,17 @@ export async function authRoutes(server: FastifyInstance) {
           }
         });
 
-        await tx.registrationCode.update({
-          where: { id: codeRecord.id },
-          data: {
-            isUsed: true,
-            usedByUserId: newUser.id,
-            usedByUserName: newUser.name
-          }
-        });
+        // Only mark as used if NOT global
+        if (!(codeRecord as any).isGlobal) {
+          await tx.registrationCode.update({
+            where: { id: codeRecord.id },
+            data: {
+              isUsed: true,
+              usedByUserId: newUser.id,
+              usedByUserName: newUser.name
+            }
+          });
+        }
 
         return newUser;
       });
