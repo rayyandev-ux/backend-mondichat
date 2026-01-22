@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { PrismaClient } from '@prisma/client';
 import { processUserQuery, transcribeAudio } from '../services/aiAgent.js';
-import { sendWazendMessage } from '../services/wazend.js';
+import { sendWazendMessage, sendWazendReaction } from '../services/wazend.js';
 
 const prisma = new PrismaClient();
 
@@ -92,16 +92,27 @@ export async function webhookRoutes(server: FastifyInstance) {
       const phoneNumber = remoteJid.split('@')[0] || ''; // Extract number (e.g., 51999999999)
       
       if (!phoneNumber) return reply.status(200).send('ok');
+
+      const messageId = messageData.key.id;
+      let reactionSent = false;
+      const applyReaction = async (emoji: string) => {
+        if (!messageId) return;
+        await sendWazendReaction(remoteJid, messageId, emoji);
+      };
       
       // Extract text content or audio
       let text = '';
       let isAudio = false;
 
+      await applyReaction("⏳");
+      reactionSent = true;
+
       if (messageData.message?.audioMessage?.url) {
           isAudio = true;
           try {
               request.log.info({ msg: 'Audio detected, transcribing...' });
-              text = await transcribeAudio(messageData.message.audioMessage.url);
+              // Pass the full messageData object for decryption
+              text = await transcribeAudio(messageData);
               request.log.info({ msg: 'Audio transcribed', text });
           } catch (e) {
               request.log.error(e);
@@ -118,12 +129,18 @@ export async function webhookRoutes(server: FastifyInstance) {
                // Audio failed to transcribe
                await sendWazendMessage(phoneNumber, "⚠️ Lo siento, no pude entender el audio. Por favor intenta enviarlo de nuevo o escribe tu mensaje.");
           }
+          if (reactionSent) {
+            await applyReaction("🍪");
+          }
           return reply.status(200).send('ok');
       }
 
       // 1. Linking Logic (#Mondi-XXXX)
       if (text.startsWith('#Mondi-')) {
         await handleLinking(text, phoneNumber, reply);
+        if (reactionSent) {
+          await applyReaction("🍪");
+        }
         return;
       }
 
@@ -137,14 +154,31 @@ export async function webhookRoutes(server: FastifyInstance) {
         request.log.info({ msg: 'Forwarding to AI Agent', userId: user.id, query: text });
         const response = await processUserQuery(user.id, text, user.name || 'Vendedor');
         await sendWazendMessage(phoneNumber, response);
+        if (reactionSent) {
+          await applyReaction("🍪");
+        }
       } else {
         await sendWazendMessage(phoneNumber, "Hola, no reconozco este número. Por favor, regístrate en la web y envía tu código de vinculación (ej: #Mondi-1234).");
+        if (reactionSent) {
+          await applyReaction("🍪");
+        }
       }
 
       return reply.status(200).send('ok');
 
     } catch (error) {
       request.log.error(error);
+      try {
+        const payload = request.body as WazendWebhookPayload;
+        const data = (payload as any)?.data;
+        const messageData =
+          (data && Array.isArray(data.messages) && data.messages.length > 0 && data.messages[0]) ||
+          (data && 'key' in data ? data : undefined);
+        if (messageData?.key?.id && messageData?.key?.remoteJid) {
+          await sendWazendReaction(messageData.key.remoteJid, messageData.key.id, "🍪");
+        }
+      } catch {
+      }
       return reply.status(500).send('error');
     }
   });

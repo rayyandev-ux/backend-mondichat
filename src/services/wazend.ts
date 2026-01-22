@@ -84,3 +84,36 @@ export async function sendWazendMessage(phoneNumber: string, text: string) {
     console.error("WAZEND Network Error:", e);
   }
 }
+
+export async function sendWazendReaction(remoteJid: string, messageId: string, emoji: string) {
+  const url = `${WAZEND_API_BASE}/message/sendReaction/${WAZEND_SESSION}`;
+
+  try {
+    const body = {
+      key: {
+        remoteJid,
+        fromMe: false,
+        id: messageId
+      },
+      reaction: emoji
+    };
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': WAZEND_API_TOKEN
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      console.error("WAZEND Error:", response.status, err);
+    } else {
+      console.log("WAZEND Reaction Sent:", remoteJid, emoji);
+    }
+  } catch (e) {
+    console.error("WAZEND Network Error:", e);
+  }
+}

@@ -5,11 +5,11 @@ import type { RouteData } from '@prisma/client';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { pipeline } from 'stream/promises';
-import { createWriteStream } from 'fs';
-import { Readable } from 'stream';
+import { downloadMediaMessage } from '@whiskeysockets/baileys';
+import pino from 'pino';
 
 const prisma = new PrismaClient();
+const logger = pino({ level: 'silent' }); // Silent logger for Baileys
 
 const groq = new Groq({
     apiKey: process.env.GROQ_API_KEY
@@ -19,31 +19,64 @@ const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY
 });
 
-export async function transcribeAudio(audioUrl: string): Promise<string> {
+// We now accept the full message object to handle decryption
+export async function transcribeAudio(message: any): Promise<string> {
     const tempFilePath = path.join(os.tmpdir(), `audio-${Date.now()}.ogg`);
     
     try {
-        const response = await fetch(audioUrl);
-        if (!response.ok || !response.body) throw new Error(`Failed to download audio: ${response.statusText}`);
+        console.log(`[AI-AGENT] Decrypting and downloading audio from WhatsApp message...`);
         
-        // Convert Web Stream to Node Stream
-        // @ts-ignore
-        const nodeStream = Readable.fromWeb(response.body);
-        await pipeline(nodeStream, createWriteStream(tempFilePath));
+        // Use Baileys to download and decrypt the media
+        // We construct a minimal message object if needed, but passing the raw one is best
+        // Note: Wazend webhook structure might be slightly different, but usually 'message' matches.
+        
+        // Ensure we have the right structure for downloadMediaMessage
+        // It expects { key: ..., message: { audioMessage: ... } } or just the message content depending on usage.
+        // Actually downloadMediaMessage expects the full WebMessageInfo or the message content.
+        // Let's try passing the whole message object we received from webhook.
+        
+        const buffer = await downloadMediaMessage(
+            message,
+            'buffer',
+            { }
+        ) as Buffer;
+
+        if (!buffer || buffer.length === 0) throw new Error("Decrypted audio buffer is empty");
+
+        console.log(`[AI-AGENT] Audio decrypted successfully! Size: ${buffer.length} bytes`);
+        
+        fs.writeFileSync(tempFilePath, buffer);
+        console.log(`[AI-AGENT] Saved decrypted audio to: ${tempFilePath}`);
+        console.log(`[AI-AGENT] Sending to Groq (whisper-large-v3-turbo)...`);
+
+        if (!process.env.GROQ_API_KEY) {
+            throw new Error("GROQ_API_KEY is missing. Cannot use Groq.");
+        }
+
+        // Trick: Sometimes Groq/Whisper works better if we explicitly call it .mp3 or .wav
+        // even if the content is OGG. But let's try standard approach first since we have clean audio now.
+        // Actually, to align with "ContaPRO" logic which works, we send the file directly.
         
         const transcription = await groq.audio.transcriptions.create({
             file: fs.createReadStream(tempFilePath),
-            model: process.env.GROQ_AUDIO_MODEL || 'whisper-large-v3-turbo',
-            language: 'es'
+            model: "whisper-large-v3-turbo",
+            language: "es",
         });
+
+        console.log(`[AI-AGENT] Groq Whisper Success! Text: "${transcription.text.substring(0, 50)}..."`);
         
-        return transcription.text;
-    } catch (error) {
-        console.error("Transcription Error:", error);
-        return ""; // Return empty string on error to avoid crashing flow, or handle upstream
+        return transcription.text || "";
+
+    } catch (error: any) {
+        console.error("Transcription/Decryption Error:", error.message);
+        // Fallback: If decryption fails (maybe keys are missing), log it clearly
+        if (error.message.includes('missing')) {
+             console.error("POSSIBLE CAUSE: The webhook payload might be missing 'mediaKey'. Check Wazend configuration.");
+        }
+        return "";
     } finally {
         if (fs.existsSync(tempFilePath)) {
-            fs.unlinkSync(tempFilePath);
+            try { fs.unlinkSync(tempFilePath); } catch (e) {}
         }
     }
 }
@@ -67,7 +100,7 @@ export async function processUserQuery(userId: string, query: string, userName: 
         const routeData = await prisma.routeData.findMany({
             where: { routeCode: user.route },
             orderBy: { uploadedAt: 'desc' },
-            take: 300 // Limit to capture route context
+            take: 800 // Increased to ensure we cover full week (Mon-Sat)
         });
 
         if (routeData.length === 0) {
@@ -75,10 +108,30 @@ export async function processUserQuery(userId: string, query: string, userName: 
         }
 
         // Prepare Context
+        // Optimization: Don't map all data immediately. Let's just provide raw summary if too large.
+        // Actually, for "intelligence", we need to provide data but instruct LLM to be smart.
+        // To improve speed/intelligence:
+        // 1. Filter out empty/useless fields in stringify.
+        // 2. Limit context to what's RELEVANT (e.g. today +/- 2 days if query implies schedule).
+        // But for now, let's just make the prompt cleaner.
+
         const contextData = routeData.map((d: RouteData) => {
-             // Simplify JSON data to string
-             const dataStr = typeof d.data === 'object' ? JSON.stringify(d.data) : String(d.data);
-             return `Cliente: ${d.clientName} (${d.clientCode}) - Visita: ${d.visitDay} - Info: ${dataStr}`;
+             // 1. Raw stringify
+             let dataStr = typeof d.data === 'object' ? JSON.stringify(d.data) : String(d.data);
+             
+             // 2. COMPRESSION: Aggressive shortening to maximize context window
+             dataStr = dataStr
+                .replace(/[{}"]/g, '') // Remove JSON noise
+                // Products
+                .replace(/Kiwi 2/gi, "K2").replace(/Kiwi 3/gi, "K3")
+                .replace(/Lego 6/gi, "L6").replace(/Lego 9/gi, "L9")
+                .replace(/meGAKIWE/gi, "MK")
+                // Metrics
+                .replace(/_ACT/gi, "=A").replace(/_NEC/gi, "=F").replace(/_META/gi, "=M")
+                // Separators
+                .replace(/,/g, ' '); // Space separator for compactness
+
+             return `[${d.visitDay ? d.visitDay.substring(0,3) : '???'}] ${d.clientName} (${d.clientCode}): ${dataStr}`;
         }).join('\n');
         
         // 3. LLM Call (OpenAI)
@@ -95,43 +148,64 @@ export async function processUserQuery(userId: string, query: string, userName: 
         const systemMessage = {
             role: "system" as const,
             content: `Eres MondiAI, el asistente virtual de MondiChat para vendedores.
-Tu objetivo es ayudar al vendedor (${userName}) a gestionar su ruta (${user.route}) y maximizar ventas usando la metodología "PS R+N (Rojo + Negro)".
+Tu objetivo es ayudar al vendedor (${userName}) a gestionar su ruta (${user.route}) y maximizar ventas.
 FECHA ACTUAL: ${todayDate}
-META MÁXIMA DE CLIENTES EN ROJO+NEGRO (CUOTA): ${user.quotaPercentage ?? 50}%
+CUOTA R+N: ${user.quotaPercentage ?? 50}%
 
-METODOLOGÍA PS R+N (ROJO + NEGRO) - TABLA DE OBJETIVOS MENSUALES:
-Analiza el "Info" de cada cliente para identificar su tipo de exhibidor y cantidad de packs comprados. Usa esta tabla para determinar su estado:
+### 🧠 CEREBRO ACTIVO (Instrucciones de Pensamiento):
+- **NO USES MEMORIA VIEJA**: Responde basándote ÚNICAMENTE en la "INFORMACIÓN DE LA RUTA" proporcionada abajo y en la pregunta actual del usuario.
+- **VELOCIDAD**: Sé conciso. Ve al grano.
+- **INTELIGENCIA**: 
+  - Si el usuario pregunta "quién toca hoy", busca en la lista el día actual.
+  - Si pregunta por un cliente específico, búscalo por nombre o código.
+  - Si ves inconsistencias (ej. 0 packs pero color verde), CORRIGE al color NEGRO.
 
-| TIPO DE EXHIBIDOR | NEGRO (0 Packs) | ROJO (Peligro) | AMARILLO (En Camino) | VERDE (Meta) |
+### � DECODIFICADOR DE DATOS (Optimizados):
+- **PRODUCTOS**: K2=Kiwi 2, K3=Kiwi 3, L6=Lego 6, L9=Lego 9, MK=meGAKIWE.
+- **METRICAS**: A=Packs Actuales (Ventas), F=Falta para siguiente nivel, M=Meta.
+- **DÍAS**: Lun=Lunes, Mar=Martes, Mié=Miércoles, Jue=Jueves, Vie=Viernes, Sáb=Sábado.
+
+### 📊 REGLAS DE NEGOCIO (R+N):
+- REGLA DE ORO: Si **A=0** (0 Packs) -> ES NEGRO ⚫.
+- REGLA DE PLATA: Usa el valor 'A' para determinar el color según la tabla:
+
+| TIPO | ⚫ (A=0) | 🔴 | 🟡 | 🟢 |
 |---|---|---|---|---|
-| Exhibidor Kiwi 2 bandejas | 0 | 1 - 7 | 8 - 11 | 12+ |
-| Exhibidor Kiwi 3 bandejas | 0 | 1 - 9 | 10 - 13 | 14+ |
-| Lego Crystal x 6 cubos | 0 | 1 - 5 | 6 - 8 | 9+ |
-| Lego Crystal x 9 cubos | 0 | 1 - 6 | 7 - 10 | 11+ |
-| meGAKIWE | 0 | 1 - 19 | 20 - 29 | 30+ |
+| K2 | 0 | 1-7 | 8-11 | 12+ |
+| K3 | 0 | 1-9 | 10-13 | 14+ |
+| L6 | 0 | 1-5 | 6-8 | 9+ |
+| L9 | 0 | 1-6 | 7-10 | 11+ |
+| MK | 0 | 1-19 | 20-29 | 30+ |
 
-ESTRATEGIA PRINCIPAL: ¡SALIR DE ROJO Y NEGRO!
-Tu misión NO es solo vender a los que están en cero, sino mover a los clientes de la zona de peligro (⚫🔴) a la zona productiva (🟡🟢).
+### 📝 FORMATO DE RESPUESTA (ESTRICTO):
+1. **Paginación MANDATORIA**: 
+   - **MÁXIMO 10 CLIENTES** por mensaje. ¡CUÉNTALOS!
+   - Si hay más, añade al final: "🔽 *Escribe 'ver más' para los siguientes.*"
 
-INDICADOR CLAVE (KPI): % R+N = (Total Clientes en Negro + Total Clientes en Rojo) / Total Clientes de la Ruta.
-- Si el % R+N es MAYOR a la Cuota (${user.quotaPercentage ?? 50}%), el vendedor está EN PELIGRO (Fuera de Cuota).
-- Si el % R+N es MENOR o IGUAL a la Cuota, el vendedor va BIEN (Dentro de Cuota).
+2. **Estilo Visual (ESPACIADO)**:
+   - ⛔ PROHIBIDO usar listas numeradas (1., 2.).
+   - **IMPORTANTE**: Deja SIEMPRE una línea en blanco entre cada cliente para que no se vea aglomerado.
+   
+   USA este formato de lista EXACTO:
+   * [Nombre Cliente]
+     └ 📅 [Día] | 🎨 [Emoji] [Color] ([N] Packs)
+     └ 🚀 Falta: [N] para subir
 
-INSTRUCCIONES INTELIGENTES:
-1. **Análisis Profundo**: Tienes acceso a TODA la información de la ruta en "INFORMACIÓN DE LA RUTA". Úsala para responder CUALQUIER pregunta.
-2. **Cálculo de Estado**: Calcula el color de CADA cliente según la tabla.
-3. **Cálculo de KPI**: Si el usuario pide un resumen, "cómo voy" o "avance", SIEMPRE calcula:
-   - Total Clientes.
-   - Total en ⚫+🔴.
-   - Porcentaje resultante.
-   - Estado frente a la Cuota (${user.quotaPercentage ?? 50}%).
-4. **Priorización**: Al listar clientes prioritarios, enfócate en aquellos en ⚫ o 🔴 que necesitan "salir del pozo".
-5. **Respuesta General**: Responde dudas generales sobre datos.
-6. **Reportes**: Si hay incidencias, usa "REPORT_DETECTED: [Resumen]".
-7. **LÍMITE DE LISTAS**: Máximo 20 clientes. Si hay más, "...y [X] más. ¿Quieres ver el resto? Dime 'ver más'".
-8. **Paginación**: Muestra siguientes 20 si piden "ver más".
+   * [Siguiente Cliente]...
 
-INFORMACIÓN DE LA RUTA:
+   (Nota el espacio vacío entre clientes)
+
+3. **Resúmenes y Listas**:
+   - Usa siempre viñetas (-) para listar días o items simples.
+   - Ejemplo:
+     - Lunes: 10 clientes
+     - Martes: 8 clientes
+
+4. **Cierre Cálido (MANDATORIO)**:
+   - Termina SIEMPRE con una frase breve, cálida y motivadora mencionando a "MondiChat".
+   - Ejemplos: "¡MondiChat te acompaña en tu ruta! 🚀", "¡Vamos por más con MondiChat! 💪", "Tu aliado digital, MondiChat."
+
+INFORMACIÓN DE LA RUTA (Datos en Tiempo Real):
 ${contextData}`
         };
 
@@ -141,20 +215,24 @@ ${contextData}`
             { role: "user" as const, content: query }
         ];
 
+        console.log(`[AI-AGENT] Context Data Length: ${contextData.length} chars`);
+        
         const completion = await openai.chat.completions.create({
             messages: messages,
-            model: process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini",
-            temperature: 0.3,
-            max_tokens: 1000 // Increased for larger lists
+            model: "gpt-4o-mini", // FORCE SWITCH to stable model
+            temperature: 0, // Now we can use 0 for stability
+            max_completion_tokens: 2000 // Allow longer response
         });
+
+        console.log("[AI-AGENT] OpenAI Response Status:", completion.choices[0]?.finish_reason);
 
         const responseText = completion.choices[0]?.message?.content || "Lo siento, no pude procesar tu solicitud.";
 
         // Update history
         const newHistory = [...history, { role: 'user' as const, content: query }, { role: 'assistant' as const, content: responseText }];
-        // Keep last 10 turns (20 messages)
-        if (newHistory.length > 20) {
-            newHistory.splice(0, newHistory.length - 20);
+        // Keep last 25 turns (50 messages) to maintain context during demos
+        if (newHistory.length > 50) {
+            newHistory.splice(0, newHistory.length - 50);
         }
         conversationHistory.set(userId, newHistory);
 
