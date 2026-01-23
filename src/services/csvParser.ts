@@ -6,53 +6,55 @@ const prisma = new PrismaClient();
 const normalizeKey = (value: string) => value.trim().toUpperCase().replace(/[\s/]+/g, '_');
 
 const standaloneHeaderMap: Record<string, string> = {
-  PACKS_DISPLAYS: "EXHIBIDOR",
-  DISPLAYS: "META_PACKS",
-  NEGRO: "RANGO_NEGRO",
-  ROJO: "RANGO_ROJO",
-  AMARILLO: "RANGO_AMARILLO",
-  VERDE: "RANGO_VERDE"
+  EXHIBIDOR_KIWES: "EXHIBIDOR_KIWES",
+  COLOR_ACTUAL_KIWES: "COLOR_ACTUAL_KIWES",
+  PACKS_VENDIDOS_KIWES: "PACKS_VENDIDOS_KIWES",
+  SIGUIENTE_NIVEL_OBJETIVO_KIWES: "SIGUIENTE_NIVEL_OBJETIVO_KIWES",
+  "PACKS_FALTANTES_SIGUIENTE NIVEL_KIWES": "PACKS_FALTANTES_KIWES",
+  EXHIBIDOR_LEGOS: "EXHIBIDOR_LEGOS",
+  COLOR_ACTUAL_LEGOS: "COLOR_ACTUAL_LEGOS",
+  PACKS_VENDIDOS_LEGOS: "PACKS_VENDIDOS_LEGOS",
+  SIGUIENTE_NIVEL_OBJETIVO_LEGOS: "SIGUIENTE_NIVEL_OBJETIVO_LEGOS",
+  "PACKS_FALTANTES_SIGUIENTE NIVEL_LEGOS": "PACKS_FALTANTES_LEGOS"
 };
 
 export async function processCsvUpload(fileBuffer: Buffer) {
+  // Detect delimiter: try to parse first line
+  const content = fileBuffer.toString('utf-8');
+  const firstLine = content.split(/\r?\n/)[0] || "";
+  const delimiter = firstLine.includes(';') ? ';' : ',';
+
   // Parse the CSV content
   const records = parse(fileBuffer, {
     skip_empty_lines: true,
     relax_column_count: true,
+    delimiter: delimiter,
+    trim: true
   });
 
-  if (records.length < 3) {
-    throw new Error("El archivo CSV debe tener al menos 3 filas (categorías, cabeceras y datos)");
+  if (records.length < 2) { // Allow header + 1 data row
+    throw new Error("El archivo CSV debe tener al menos 2 filas (cabeceras y datos)");
   }
 
   const categories = records[0] as string[];
-  const headers = records[1] as string[];
-  const fallbackHeaders = records[2] as string[];
-  const resolvedHeaders = headers.map((header, index) => header?.trim() ? header : (fallbackHeaders?.[index] || ""));
+  // If only 1 header row (simple CSV), use it directly. 
+  // But logic below assumes multi-row headers. 
+  // Let's adapt: The provided CSV is single-header row (line 1).
+  // records[0] is header.
+  
+  const headers = records[0] as string[]; 
+  
   const mappedHeaders: string[] = [];
-  let currentCategory = "";
 
-  for (let i = 0; i < Math.max(categories.length, resolvedHeaders.length); i++) {
-    const cat = categories[i]?.trim() || "";
-    const sub = resolvedHeaders[i]?.trim() || "";
-
-    const lowerCat = cat.toLowerCase();
-    if (cat && lowerCat !== "actual" && lowerCat !== "necesidad") {
-      currentCategory = cat;
+  for (let i = 0; i < headers.length; i++) {
+    let key = headers[i]?.trim() || "";
+    // Check direct map first
+    if (standaloneHeaderMap[key]) {
+        mappedHeaders.push(standaloneHeaderMap[key]);
+    } else {
+        // Fallback or keep as is (normalized)
+        mappedHeaders.push(normalizeKey(key));
     }
-
-    let key = sub ? normalizeKey(sub) : "";
-    const mappedStandalone = key ? standaloneHeaderMap[key] : "";
-    if (mappedStandalone) {
-      key = mappedStandalone;
-    } else if (key && i >= 10) {
-      const useCategory = (!cat || lowerCat === "actual" || lowerCat === "necesidad") ? currentCategory : cat;
-      if (useCategory) {
-        key = `${normalizeKey(useCategory)}_${key}`;
-      }
-    }
-
-    mappedHeaders.push(key || "");
   }
 
   // Generate Batch ID
@@ -60,8 +62,8 @@ export async function processCsvUpload(fileBuffer: Buffer) {
 
   const routeDataEntries = [];
 
-  // Iterate data rows (starting from index 2)
-  for (let i = 2; i < records.length; i++) {
+  // Iterate data rows (starting from index 1 since 0 is header)
+  for (let i = 1; i < records.length; i++) {
     const row = records[i] as string[] | undefined;
     if (!row) continue;
 
@@ -83,25 +85,20 @@ export async function processCsvUpload(fileBuffer: Buffer) {
       if (!key) continue;
 
       // Map to core fields
-      if (key === "RUTA_LOGICA") routeCode = value;
+      if (key === "RUTA" || key === "RUTA_LOGICA") routeCode = value;
       else if (key === "COD_CLIENTE") clientCode = value;
       else if (key === "NOMBRE_CLIENTE") clientName = value;
-      else if (key === "DIA_V") visitDay = value;
+      else if (key === "DIA_VISITA" || key === "DIA_V") visitDay = value;
       else {
-        if (value) {
-            const normalizedValue = normalizeKey(value);
-            if (standaloneHeaderMap[normalizedValue]) continue;
-            dynamicData[key] = value;
-        }
+         dynamicData[key] = value;
       }
     }
 
-    // Validation: Require Route Code and Client Code
-    if (!routeCode || !clientCode) {
-        // Skip row or log warning?
-        // Let's skip invalid rows to avoid polluting DB
-        continue;
-    }
+    // Validation: Require Client Code and Valid Route
+    if (!clientCode) continue;
+    
+    // Ignore routes "0" or empty
+    if (!routeCode || routeCode === "0" || routeCode === "0.0") continue;
 
     routeDataEntries.push({
         routeCode,

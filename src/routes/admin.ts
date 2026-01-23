@@ -133,4 +133,31 @@ export async function adminRoutes(server: FastifyInstance) {
         return reply.status(500).send({ error: "Error unlinking user" });
     }
   });
+
+  server.patch('/admin/users/:id/route', {
+    preValidation: [server.authenticate]
+  }, async (request: any, reply) => {
+    const requesterRole = request.user.role;
+    if (requesterRole !== 'admin') {
+        return reply.status(403).send({ error: "No autorizado" });
+    }
+
+    const { id } = request.params as { id: string };
+    const { route } = request.body as { route?: string };
+
+    if (!route || typeof route !== 'string') {
+        return reply.status(400).send({ error: "Ruta requerida" });
+    }
+
+    try {
+        const updated = await prisma.user.update({
+            where: { id },
+            data: { route }
+        });
+        return { success: true, user: updated };
+    } catch (error) {
+        request.log.error(error);
+        return reply.status(500).send({ error: "Error actualizando ruta" });
+    }
+  });
 }

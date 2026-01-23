@@ -90,14 +90,16 @@ const parseNumber = (value: unknown) => {
     return Number.isFinite(num) ? num : null;
 };
 
-const getExhibidorType = (name: string) => {
-    const normalized = name.toLowerCase();
-    if (normalized.includes("kiwi 2")) return "K2";
-    if (normalized.includes("kiwi 3")) return "K3";
-    if (normalized.includes("lego") && normalized.includes("x 6")) return "L6";
-    if (normalized.includes("lego") && normalized.includes("x 9")) return "L9";
-    if (normalized.includes("megakiwe")) return "MK";
-    return null;
+const getExhibidorType = (data: Record<string, any>) => {
+    // If it has both Kiwe and Lego, or just one, let's detect.
+    // The CSV splits them. We can just return a label or handle logic in the caller.
+    // For now, let's return a combined string or just prefer one if active.
+    const k = data.EXHIBIDOR_KIWES;
+    const l = data.EXHIBIDOR_LEGOS;
+    if (k && k !== "NO" && l && l !== "NO") return "MIXTO";
+    if (k && k !== "NO") return "KIWE";
+    if (l && l !== "NO") return "LEGO";
+    return "N/D";
 };
 
 const getDefaultThresholds = (type: string | null) => {
@@ -154,7 +156,7 @@ const resolveColorFilter = (queryText: string) => {
 const isMoreQuery = (queryText: string) => /ver\s+mas/.test(queryText);
 
 const isListIntent = (queryText: string) => {
-    const triggers = ["quien toca", "quien toca hoy", "toca hoy", "lista", "clientes", "dame", "muestrame", "muéstrame", "rojo", "negro", "amarillo", "verde"];
+    const triggers = ["quien toca", "quien toca hoy", "toca hoy", "lista", "clientes", "dame", "muestrame", "muéstrame", "rojo", "negro", "amarillo", "verde", "prioridad", "prioritarios", "faltan", "falta", "faltantes", "orden", "ordenados", "priorizar"];
     return triggers.some(trigger => queryText.includes(trigger));
 };
 
@@ -210,31 +212,56 @@ export async function processUserQuery(userId: string, query: string, userName: 
 
         const clientSummaries = routeData.map((d: RouteData) => {
             const data = (d.data || {}) as Record<string, any>;
-            const exhibidor = String(data.EXHIBIDOR || data.PACKS_DISPLAYS || "").trim();
-            const tipo = getExhibidorType(exhibidor);
-            const kiweActual = parseNumber(data.KIWE_ACTUAL ?? data.KIWE_ACTUAL_ACTUAL ?? data.KIWE_ACT ?? data.ACTUAL_ACTUAL ?? data.ACTUAL);
-            const legoActual = parseNumber(data.LEGO_ACTUAL ?? data.LEGO_ACTUAL_ACTUAL ?? data.LEGO_ACT ?? data.ACTUAL_ACTUAL ?? data.ACTUAL);
-            const packsActual = tipo && tipo.startsWith("L") ? legoActual : (tipo === "MK" || tipo?.startsWith("K") ? kiweActual : (kiweActual ?? legoActual));
-            const rangoRojo = parseNumber(data.RANGO_ROJO);
-            const rangoAmarillo = parseNumber(data.RANGO_AMARILLO);
-            const rangoVerde = parseNumber(data.RANGO_VERDE);
-            const defaults = getDefaultThresholds(tipo);
-            const thresholds = {
-                rojoMin: rangoRojo ?? defaults.rojoMin,
-                amarilloMin: rangoAmarillo ?? defaults.amarilloMin,
-                verdeMin: rangoVerde ?? defaults.verdeMin
-            };
-            const colorInfo = computeColorInfo(packsActual, thresholds);
-            const metaPacks = parseNumber(data.META_PACKS);
+            
+            // Extract Kiwe Info
+            const kExhibidor = data.EXHIBIDOR_KIWES && data.EXHIBIDOR_KIWES !== "NO" ? data.EXHIBIDOR_KIWES : null;
+            const kColor = data.COLOR_ACTUAL_KIWES && data.COLOR_ACTUAL_KIWES !== "NO" ? data.COLOR_ACTUAL_KIWES : null;
+            const kPacks = parseNumber(data.PACKS_VENDIDOS_KIWES);
+            const kFalta = parseNumber(data.PACKS_FALTANTES_KIWES);
+            const kMeta = data.SIGUIENTE_NIVEL_OBJETIVO_KIWES && data.SIGUIENTE_NIVEL_OBJETIVO_KIWES !== "NO" ? data.SIGUIENTE_NIVEL_OBJETIVO_KIWES : null;
+
+            // Extract Lego Info
+            const lExhibidor = data.EXHIBIDOR_LEGOS && data.EXHIBIDOR_LEGOS !== "NO" ? data.EXHIBIDOR_LEGOS : null;
+            const lColor = data.COLOR_ACTUAL_LEGOS && data.COLOR_ACTUAL_LEGOS !== "NO" ? data.COLOR_ACTUAL_LEGOS : null;
+            const lPacks = parseNumber(data.PACKS_VENDIDOS_LEGOS);
+            const lFalta = parseNumber(data.PACKS_FALTANTES_LEGOS);
+            const lMeta = data.SIGUIENTE_NIVEL_OBJETIVO_LEGOS && data.SIGUIENTE_NIVEL_OBJETIVO_LEGOS !== "NO" ? data.SIGUIENTE_NIVEL_OBJETIVO_LEGOS : null;
+
+            // Determine Primary (if mixed, show both or primary?)
+            // For simplicity in chat list, we combine if both exist.
+            let exhibidorText = "N/D";
+            let packsText = "N/D";
+            let colorText = "N/D";
+            let faltaText = "N/D";
+            let faltaDisplay = "N/D";
+            let metaText = "N/D";
+
+            if (kExhibidor && lExhibidor) {
+                exhibidorText = `Kiwe: ${kExhibidor} | Lego: ${lExhibidor}`;
+                packsText = `K:${kPacks} L:${lPacks}`;
+                colorText = `K:${kColor} L:${lColor}`;
+                faltaText = `Kiwe ${kExhibidor}: ${kFalta} | Lego ${lExhibidor}: ${lFalta}`;
+                faltaDisplay = `Kiwe ${kExhibidor} ${kFalta ?? 0} | Lego ${lExhibidor} ${lFalta ?? 0}`;
+                metaText = `K:${kMeta} L:${lMeta}`;
+            } else if (kExhibidor) {
+                exhibidorText = kExhibidor;
+                packsText = String(kPacks ?? 0);
+                colorText = kColor ?? "N/D";
+                faltaText = `${kExhibidor}: ${kFalta ?? 0}`;
+                faltaDisplay = `${kFalta ?? 0} (${kExhibidor})`;
+                metaText = kMeta ?? "N/D";
+            } else if (lExhibidor) {
+                exhibidorText = lExhibidor;
+                packsText = String(lPacks ?? 0);
+                colorText = lColor ?? "N/D";
+                faltaText = `${lExhibidor}: ${lFalta ?? 0}`;
+                faltaDisplay = `${lFalta ?? 0} (${lExhibidor})`;
+                metaText = lMeta ?? "N/D";
+            }
 
             const dayLabel = d.visitDay ? d.visitDay.substring(0,3) : '???';
             const clientName = d.clientName || 'Cliente sin nombre';
             const clientCode = d.clientCode || 'N/D';
-            const exhibidorText = exhibidor || 'N/D';
-            const packsText = packsActual !== null ? String(packsActual) : 'N/D';
-            const faltaText = colorInfo.falta !== null ? String(colorInfo.falta) : 'N/D';
-            const metaText = metaPacks !== null ? String(metaPacks) : 'N/D';
-            const tipoText = tipo || 'N/D';
 
             return {
                 dayLabel,
@@ -244,9 +271,10 @@ export async function processUserQuery(userId: string, query: string, userName: 
                 exhibidorText,
                 packsText,
                 faltaText,
-                color: colorInfo.color,
+                faltaDisplay,
+                color: colorText,
                 metaText,
-                tipoText
+                tipoText: getExhibidorType(data)
             };
         });
 
@@ -291,7 +319,7 @@ export async function processUserQuery(userId: string, query: string, userName: 
                     exhibidor: summary.exhibidorText,
                     color: summary.color,
                     packs: summary.packsText,
-                    falta: summary.faltaText
+                    falta: summary.faltaDisplay
                 })
             );
 

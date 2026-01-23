@@ -5,12 +5,14 @@ dotenv.config();
 const WAZEND_API_BASE = process.env.WAZEND_API_BASE || "https://api1.wazend.net";
 const WAZEND_SESSION = process.env.WAZEND_SESSION || "P2863";
 const WAZEND_API_TOKEN = process.env.WAZEND_API_TOKEN || "362F28B3-D3D7-4D72-BAA0-1FAD3364E83C";
+const MOCK_WAZEND = process.env.MOCK_WAZEND === "true";
 
 /**
  * Checks the connection state of the WAZEND instance.
  * Returns true if connected (open), false otherwise.
  */
 export async function checkWazendConnection(): Promise<boolean> {
+  if (MOCK_WAZEND) return true;
   const url = `${WAZEND_API_BASE}/instance/connectionState/${WAZEND_SESSION}`;
   console.log(`[WAZEND] Checking connection for instance ${WAZEND_SESSION}...`);
 
@@ -52,6 +54,7 @@ export async function checkWazendConnection(): Promise<boolean> {
  * Sends a text message via WAZEND.
  */
 export async function sendWazendMessage(phoneNumber: string, text: string) {
+  if (MOCK_WAZEND) return;
   // Correct Endpoint for Evolution/Baileys API: /message/sendText/{instance}
   const url = `${WAZEND_API_BASE}/message/sendText/${WAZEND_SESSION}`;
 
@@ -86,6 +89,7 @@ export async function sendWazendMessage(phoneNumber: string, text: string) {
 }
 
 export async function sendWazendReaction(remoteJid: string, messageId: string, emoji: string) {
+  if (MOCK_WAZEND) return;
   const url = `${WAZEND_API_BASE}/message/sendReaction/${WAZEND_SESSION}`;
 
   try {
