@@ -3,6 +3,17 @@ import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
+const normalizeKey = (value: string) => value.trim().toUpperCase().replace(/[\s/]+/g, '_');
+
+const standaloneHeaderMap: Record<string, string> = {
+  PACKS_DISPLAYS: "EXHIBIDOR",
+  DISPLAYS: "META_PACKS",
+  NEGRO: "RANGO_NEGRO",
+  ROJO: "RANGO_ROJO",
+  AMARILLO: "RANGO_AMARILLO",
+  VERDE: "RANGO_VERDE"
+};
+
 export async function processCsvUpload(fileBuffer: Buffer) {
   // Parse the CSV content
   const records = parse(fileBuffer, {
@@ -14,50 +25,34 @@ export async function processCsvUpload(fileBuffer: Buffer) {
     throw new Error("El archivo CSV debe tener al menos 3 filas (categorías, cabeceras y datos)");
   }
 
-  const categories = records[0] as string[]; // Row 1: Categories (KIWE, LEGO...)
-  const headers = records[1] as string[];    // Row 2: Sub-headers (Kx2, NEGRO...)
-  
-  // Construct the mapping keys
+  const categories = records[0] as string[];
+  const headers = records[1] as string[];
+  const fallbackHeaders = records[2] as string[];
+  const resolvedHeaders = headers.map((header, index) => header?.trim() ? header : (fallbackHeaders?.[index] || ""));
   const mappedHeaders: string[] = [];
   let currentCategory = "";
 
-  for (let i = 0; i < Math.max(categories.length, headers.length); i++) {
+  for (let i = 0; i < Math.max(categories.length, resolvedHeaders.length); i++) {
     const cat = categories[i]?.trim() || "";
-    const sub = headers[i]?.trim() || "";
+    const sub = resolvedHeaders[i]?.trim() || "";
 
-    if (cat) {
+    const lowerCat = cat.toLowerCase();
+    if (cat && lowerCat !== "actual" && lowerCat !== "necesidad") {
       currentCategory = cat;
     }
 
-    // If both are empty, ignore or use index? 
-    // In this CSV, the first few columns have empty Category but valid Header.
-    // "KIWE" starts later.
-    
-    let key = sub || "";
-    if (currentCategory && i >= 10) { // Heuristic: Categories start appearing later or use logic
-       // Actually, if there is a category, we prepend it.
-       // But "mesa", "RUTA LÓGICA" don't have category.
-       // Logic: If column has a Category, use Cat_Sub. Else use Sub.
-       // However, the Category applies to a range.
-       // "KIWE" is at index 10. "NEGRO" is at index 10. So "KIWE_NEGRO".
-       // Index 11 has empty Category but "ROJO". Since "KIWE" was at 10, does it apply to 11?
-       // The user said "KIWE" spans multiple.
-       // So yes, we keep `currentCategory`.
-       
-       // Reset currentCategory if we hit a new one? 
-       // Or if we hit a column that clearly doesn't belong?
-       // In Excel merged cells, usually only the first cell has the value.
-       // So `currentCategory` persists until a NEW category appears OR we decide it ends.
-       // Let's assume it persists.
-       
-       // Exception: The first few columns (0-9) might effectively have "Info" or no category.
-       // "KIWE" appears at 10.
-       if (key && currentCategory) {
-           key = `${currentCategory}_${key}`;
-       }
+    let key = sub ? normalizeKey(sub) : "";
+    const mappedStandalone = key ? standaloneHeaderMap[key] : "";
+    if (mappedStandalone) {
+      key = mappedStandalone;
+    } else if (key && i >= 10) {
+      const useCategory = (!cat || lowerCat === "actual" || lowerCat === "necesidad") ? currentCategory : cat;
+      if (useCategory) {
+        key = `${normalizeKey(useCategory)}_${key}`;
+      }
     }
-    
-    mappedHeaders.push(key);
+
+    mappedHeaders.push(key || "");
   }
 
   // Generate Batch ID
@@ -88,13 +83,14 @@ export async function processCsvUpload(fileBuffer: Buffer) {
       if (!key) continue;
 
       // Map to core fields
-      if (key === "RUTA LÓGICA") routeCode = value;
-      else if (key === "COD CLIENTE") clientCode = value;
-      else if (key === "NOMBRE CLIENTE") clientName = value;
-      else if (key === "DIA V") visitDay = value;
+      if (key === "RUTA_LOGICA") routeCode = value;
+      else if (key === "COD_CLIENTE") clientCode = value;
+      else if (key === "NOMBRE_CLIENTE") clientName = value;
+      else if (key === "DIA_V") visitDay = value;
       else {
-        // Add to dynamic JSON
         if (value) {
+            const normalizedValue = normalizeKey(value);
+            if (standaloneHeaderMap[normalizedValue]) continue;
             dynamicData[key] = value;
         }
       }

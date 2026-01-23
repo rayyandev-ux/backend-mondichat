@@ -82,6 +82,107 @@ export async function transcribeAudio(message: any): Promise<string> {
 }
 
 const conversationHistory = new Map<string, Array<{role: 'user' | 'assistant', content: string}>>();
+const paginationState = new Map<string, { items: string[]; index: number }>();
+
+const parseNumber = (value: unknown) => {
+    if (value === null || value === undefined) return null;
+    const num = Number(String(value).replace(/[^\d.-]/g, ''));
+    return Number.isFinite(num) ? num : null;
+};
+
+const getExhibidorType = (name: string) => {
+    const normalized = name.toLowerCase();
+    if (normalized.includes("kiwi 2")) return "K2";
+    if (normalized.includes("kiwi 3")) return "K3";
+    if (normalized.includes("lego") && normalized.includes("x 6")) return "L6";
+    if (normalized.includes("lego") && normalized.includes("x 9")) return "L9";
+    if (normalized.includes("megakiwe")) return "MK";
+    return null;
+};
+
+const getDefaultThresholds = (type: string | null) => {
+    if (type === "K2") return { rojoMin: 1, amarilloMin: 8, verdeMin: 12 };
+    if (type === "K3") return { rojoMin: 1, amarilloMin: 10, verdeMin: 14 };
+    if (type === "L6") return { rojoMin: 1, amarilloMin: 6, verdeMin: 9 };
+    if (type === "L9") return { rojoMin: 1, amarilloMin: 7, verdeMin: 11 };
+    if (type === "MK") return { rojoMin: 1, amarilloMin: 20, verdeMin: 30 };
+    return { rojoMin: 1, amarilloMin: 8, verdeMin: 12 };
+};
+
+const computeColorInfo = (packsActual: number | null, thresholds: { rojoMin: number; amarilloMin: number; verdeMin: number }) => {
+    if (packsActual === null) return { color: "N/D", falta: null };
+    if (packsActual <= 0) return { color: "NEGRO", falta: Math.max(0, thresholds.rojoMin - packsActual) };
+    if (packsActual >= thresholds.verdeMin) return { color: "VERDE", falta: 0 };
+    if (packsActual >= thresholds.amarilloMin) return { color: "AMARILLO", falta: Math.max(0, thresholds.verdeMin - packsActual) };
+    return { color: "ROJO", falta: Math.max(0, thresholds.amarilloMin - packsActual) };
+};
+
+const colorEmojiMap: Record<string, string> = {
+    NEGRO: "⚫",
+    ROJO: "🔴",
+    AMARILLO: "🟡",
+    VERDE: "🟢",
+    "N/D": "⚪"
+};
+
+const normalizeText = (value: string) =>
+    value
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "");
+
+const resolveDayFilter = (queryText: string) => {
+    const days = ["lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "domingo"];
+    for (const day of days) {
+        if (queryText.includes(day)) return day;
+    }
+    if (queryText.includes("hoy")) {
+        const today = new Date().toLocaleDateString('es-PE', { weekday: 'long', timeZone: 'America/Lima' });
+        return normalizeText(today);
+    }
+    return null;
+};
+
+const resolveColorFilter = (queryText: string) => {
+    if (queryText.includes("negro")) return "NEGRO";
+    if (queryText.includes("rojo")) return "ROJO";
+    if (queryText.includes("amarillo")) return "AMARILLO";
+    if (queryText.includes("verde")) return "VERDE";
+    return null;
+};
+
+const isMoreQuery = (queryText: string) => /ver\s+mas/.test(queryText);
+
+const isListIntent = (queryText: string) => {
+    const triggers = ["quien toca", "quien toca hoy", "toca hoy", "lista", "clientes", "dame", "muestrame", "muéstrame", "rojo", "negro", "amarillo", "verde"];
+    return triggers.some(trigger => queryText.includes(trigger));
+};
+
+const formatClientBlock = (client: {
+    name: string;
+    day: string;
+    exhibidor: string;
+    color: string;
+    packs: string;
+    falta: string;
+}) => {
+    const emoji = colorEmojiMap[client.color] || "⚪";
+    return `* ${client.name}\n  └ 🏷️ Exhibidor: ${client.exhibidor}\n  └ 📅 ${client.day} | 🎨 ${emoji} ${client.color} (${client.packs} Packs)\n  └ 🚀 Falta: ${client.falta} para subir`;
+};
+
+const buildPaginatedResponse = (items: string[], startIndex: number) => {
+    const pageSize = 10;
+    const slice = items.slice(startIndex, startIndex + pageSize);
+    const nextIndex = startIndex + slice.length;
+    const hasMore = nextIndex < items.length;
+    const footer = hasMore ? `\n\n🔽 *Escribe 'ver más' para los siguientes.*` : "";
+    const closing = `\n\n¡MondiChat te acompaña en tu ruta! 🚀`;
+    return {
+        text: slice.join("\n\n") + footer + closing,
+        nextIndex,
+        hasMore
+    };
+};
 
 export async function processUserQuery(userId: string, query: string, userName: string): Promise<string> {
     console.log(`[AI-AGENT] Processing query for ${userName} (${userId}): "${query}"`);
@@ -107,32 +208,101 @@ export async function processUserQuery(userId: string, query: string, userName: 
             return `⚠️ No hay información cargada para la ruta ${user.route}.`;
         }
 
-        // Prepare Context
-        // Optimization: Don't map all data immediately. Let's just provide raw summary if too large.
-        // Actually, for "intelligence", we need to provide data but instruct LLM to be smart.
-        // To improve speed/intelligence:
-        // 1. Filter out empty/useless fields in stringify.
-        // 2. Limit context to what's RELEVANT (e.g. today +/- 2 days if query implies schedule).
-        // But for now, let's just make the prompt cleaner.
+        const clientSummaries = routeData.map((d: RouteData) => {
+            const data = (d.data || {}) as Record<string, any>;
+            const exhibidor = String(data.EXHIBIDOR || data.PACKS_DISPLAYS || "").trim();
+            const tipo = getExhibidorType(exhibidor);
+            const kiweActual = parseNumber(data.KIWE_ACTUAL ?? data.KIWE_ACTUAL_ACTUAL ?? data.KIWE_ACT ?? data.ACTUAL_ACTUAL ?? data.ACTUAL);
+            const legoActual = parseNumber(data.LEGO_ACTUAL ?? data.LEGO_ACTUAL_ACTUAL ?? data.LEGO_ACT ?? data.ACTUAL_ACTUAL ?? data.ACTUAL);
+            const packsActual = tipo && tipo.startsWith("L") ? legoActual : (tipo === "MK" || tipo?.startsWith("K") ? kiweActual : (kiweActual ?? legoActual));
+            const rangoRojo = parseNumber(data.RANGO_ROJO);
+            const rangoAmarillo = parseNumber(data.RANGO_AMARILLO);
+            const rangoVerde = parseNumber(data.RANGO_VERDE);
+            const defaults = getDefaultThresholds(tipo);
+            const thresholds = {
+                rojoMin: rangoRojo ?? defaults.rojoMin,
+                amarilloMin: rangoAmarillo ?? defaults.amarilloMin,
+                verdeMin: rangoVerde ?? defaults.verdeMin
+            };
+            const colorInfo = computeColorInfo(packsActual, thresholds);
+            const metaPacks = parseNumber(data.META_PACKS);
 
-        const contextData = routeData.map((d: RouteData) => {
-             // 1. Raw stringify
-             let dataStr = typeof d.data === 'object' ? JSON.stringify(d.data) : String(d.data);
-             
-             // 2. COMPRESSION: Aggressive shortening to maximize context window
-             dataStr = dataStr
-                .replace(/[{}"]/g, '') // Remove JSON noise
-                // Products
-                .replace(/Kiwi 2/gi, "K2").replace(/Kiwi 3/gi, "K3")
-                .replace(/Lego 6/gi, "L6").replace(/Lego 9/gi, "L9")
-                .replace(/meGAKIWE/gi, "MK")
-                // Metrics
-                .replace(/_ACT/gi, "=A").replace(/_NEC/gi, "=F").replace(/_META/gi, "=M")
-                // Separators
-                .replace(/,/g, ' '); // Space separator for compactness
+            const dayLabel = d.visitDay ? d.visitDay.substring(0,3) : '???';
+            const clientName = d.clientName || 'Cliente sin nombre';
+            const clientCode = d.clientCode || 'N/D';
+            const exhibidorText = exhibidor || 'N/D';
+            const packsText = packsActual !== null ? String(packsActual) : 'N/D';
+            const faltaText = colorInfo.falta !== null ? String(colorInfo.falta) : 'N/D';
+            const metaText = metaPacks !== null ? String(metaPacks) : 'N/D';
+            const tipoText = tipo || 'N/D';
 
-             return `[${d.visitDay ? d.visitDay.substring(0,3) : '???'}] ${d.clientName} (${d.clientCode}): ${dataStr}`;
+            return {
+                dayLabel,
+                fullDay: d.visitDay || 'N/D',
+                clientName,
+                clientCode,
+                exhibidorText,
+                packsText,
+                faltaText,
+                color: colorInfo.color,
+                metaText,
+                tipoText
+            };
+        });
+
+        const contextData = clientSummaries.map((summary) => {
+            return `[${summary.dayLabel}] ${summary.clientName} (${summary.clientCode}): EXHIBIDOR=${summary.exhibidorText} | TIPO=${summary.tipoText} | PACKS=${summary.packsText} | COLOR=${summary.color} | FALTA=${summary.faltaText} | META=${summary.metaText}`;
         }).join('\n');
+
+        const normalizedQuery = normalizeText(query);
+        if (isMoreQuery(normalizedQuery)) {
+            const state = paginationState.get(userId);
+            if (state && state.items.length > 0) {
+                const page = buildPaginatedResponse(state.items, state.index);
+                state.index = page.nextIndex;
+                paginationState.set(userId, state);
+                if (!page.hasMore) {
+                    paginationState.delete(userId);
+                }
+                return page.text;
+            }
+            return "No hay más clientes en la lista actual. ¡MondiChat te acompaña en tu ruta! 🚀";
+        }
+
+        const listRequested = isListIntent(normalizedQuery);
+        const dayFilter = resolveDayFilter(normalizedQuery);
+        const colorFilter = resolveColorFilter(normalizedQuery);
+
+        if (listRequested || dayFilter || colorFilter) {
+            const filtered = clientSummaries.filter(summary => {
+                const dayMatch = dayFilter ? normalizeText(summary.fullDay).includes(dayFilter) : true;
+                const colorMatch = colorFilter ? summary.color === colorFilter : true;
+                return dayMatch && colorMatch;
+            });
+
+            if (filtered.length === 0) {
+                return "No encontré clientes con ese criterio. ¡MondiChat te acompaña en tu ruta! 🚀";
+            }
+
+            const items = filtered.map(summary =>
+                formatClientBlock({
+                    name: summary.clientName,
+                    day: summary.dayLabel,
+                    exhibidor: summary.exhibidorText,
+                    color: summary.color,
+                    packs: summary.packsText,
+                    falta: summary.faltaText
+                })
+            );
+
+            paginationState.set(userId, { items, index: 0 });
+            const page = buildPaginatedResponse(items, 0);
+            paginationState.set(userId, { items, index: page.nextIndex });
+            if (!page.hasMore) {
+                paginationState.delete(userId);
+            }
+            return page.text;
+        }
         
         // 3. LLM Call (OpenAI)
         if (!process.env.OPENAI_API_KEY) {
@@ -158,24 +328,14 @@ CUOTA R+N: ${user.quotaPercentage ?? 50}%
 - **INTELIGENCIA**: 
   - Si el usuario pregunta "quién toca hoy", busca en la lista el día actual.
   - Si pregunta por un cliente específico, búscalo por nombre o código.
-  - Si ves inconsistencias (ej. 0 packs pero color verde), CORRIGE al color NEGRO.
+  - Usa SIEMPRE los campos EXHIBIDOR, PACKS, COLOR y FALTA del contexto, no recalcules.
 
-### � DECODIFICADOR DE DATOS (Optimizados):
-- **PRODUCTOS**: K2=Kiwi 2, K3=Kiwi 3, L6=Lego 6, L9=Lego 9, MK=meGAKIWE.
-- **METRICAS**: A=Packs Actuales (Ventas), F=Falta para siguiente nivel, M=Meta.
-- **DÍAS**: Lun=Lunes, Mar=Martes, Mié=Miércoles, Jue=Jueves, Vie=Viernes, Sáb=Sábado.
+### 🧩 DATOS CALCULADOS:
+- EXHIBIDOR, TIPO, PACKS, COLOR, FALTA y META ya vienen listos en la información.
+- Si EXHIBIDOR es N/D, indícalo y no inventes.
 
 ### 📊 REGLAS DE NEGOCIO (R+N):
-- REGLA DE ORO: Si **A=0** (0 Packs) -> ES NEGRO ⚫.
-- REGLA DE PLATA: Usa el valor 'A' para determinar el color según la tabla:
-
-| TIPO | ⚫ (A=0) | 🔴 | 🟡 | 🟢 |
-|---|---|---|---|---|
-| K2 | 0 | 1-7 | 8-11 | 12+ |
-| K3 | 0 | 1-9 | 10-13 | 14+ |
-| L6 | 0 | 1-5 | 6-8 | 9+ |
-| L9 | 0 | 1-6 | 7-10 | 11+ |
-| MK | 0 | 1-19 | 20-29 | 30+ |
+- Usa el COLOR del contexto. Solo si faltara, responde "N/D".
 
 ### 📝 FORMATO DE RESPUESTA (ESTRICTO):
 1. **Paginación MANDATORIA**: 
@@ -187,9 +347,10 @@ CUOTA R+N: ${user.quotaPercentage ?? 50}%
    - **IMPORTANTE**: Deja SIEMPRE una línea en blanco entre cada cliente para que no se vea aglomerado.
    
    USA este formato de lista EXACTO:
-   * [Nombre Cliente]
-     └ 📅 [Día] | 🎨 [Emoji] [Color] ([N] Packs)
-     └ 🚀 Falta: [N] para subir
+  * [Nombre Cliente]
+    └ 🏷️ Exhibidor: [Exhibidor]
+    └ 📅 [Día] | 🎨 [Emoji] [Color] ([N] Packs)
+    └ 🚀 Falta: [N] para subir
 
    * [Siguiente Cliente]...
 
@@ -204,6 +365,12 @@ CUOTA R+N: ${user.quotaPercentage ?? 50}%
 4. **Cierre Cálido (MANDATORIO)**:
    - Termina SIEMPRE con una frase breve, cálida y motivadora mencionando a "MondiChat".
    - Ejemplos: "¡MondiChat te acompaña en tu ruta! 🚀", "¡Vamos por más con MondiChat! 💪", "Tu aliado digital, MondiChat."
+
+5. **Ejemplos de consulta**:
+   - "¿Qué color tiene [cliente]?"
+   - "¿Quién toca hoy?"
+   - "¿Cuánto me falta para subir de color?"
+   - "Dame los rojos de mi ruta"
 
 INFORMACIÓN DE LA RUTA (Datos en Tiempo Real):
 ${contextData}`
