@@ -27,14 +27,6 @@ export async function transcribeAudio(message: any): Promise<string> {
         console.log(`[AI-AGENT] Decrypting and downloading audio from WhatsApp message...`);
         
         // Use Baileys to download and decrypt the media
-        // We construct a minimal message object if needed, but passing the raw one is best
-        // Note: Wazend webhook structure might be slightly different, but usually 'message' matches.
-        
-        // Ensure we have the right structure for downloadMediaMessage
-        // It expects { key: ..., message: { audioMessage: ... } } or just the message content depending on usage.
-        // Actually downloadMediaMessage expects the full WebMessageInfo or the message content.
-        // Let's try passing the whole message object we received from webhook.
-        
         const buffer = await downloadMediaMessage(
             message,
             'buffer',
@@ -52,10 +44,6 @@ export async function transcribeAudio(message: any): Promise<string> {
         if (!process.env.GROQ_API_KEY) {
             throw new Error("GROQ_API_KEY is missing. Cannot use Groq.");
         }
-
-        // Trick: Sometimes Groq/Whisper works better if we explicitly call it .mp3 or .wav
-        // even if the content is OGG. But let's try standard approach first since we have clean audio now.
-        // Actually, to align with "ContaPRO" logic which works, we send the file directly.
         
         const transcription = await groq.audio.transcriptions.create({
             file: fs.createReadStream(tempFilePath),
@@ -69,7 +57,6 @@ export async function transcribeAudio(message: any): Promise<string> {
 
     } catch (error: any) {
         console.error("Transcription/Decryption Error:", error.message);
-        // Fallback: If decryption fails (maybe keys are missing), log it clearly
         if (error.message.includes('missing')) {
              console.error("POSSIBLE CAUSE: The webhook payload might be missing 'mediaKey'. Check Wazend configuration.");
         }
@@ -91,9 +78,6 @@ const parseNumber = (value: unknown) => {
 };
 
 const getExhibidorType = (data: Record<string, any>) => {
-    // If it has both Kiwe and Lego, or just one, let's detect.
-    // The CSV splits them. We can just return a label or handle logic in the caller.
-    // For now, let's return a combined string or just prefer one if active.
     const k = data.EXHIBIDOR_KIWES;
     const l = data.EXHIBIDOR_LEGOS;
     if (k && k !== "NO" && l && l !== "NO") return "MIXTO";
@@ -167,13 +151,14 @@ const formatClientBlock = (client: {
     color: string;
     packs: string;
     falta: string;
+    clientCode: string;
 }) => {
     const emoji = colorEmojiMap[client.color] || "⚪";
-    return `* ${client.name}\n  └ 🏷️ Exhibidor: ${client.exhibidor}\n  └ 📅 ${client.day} | 🎨 ${emoji} ${client.color} (${client.packs} Packs)\n  └ 🚀 Falta: ${client.falta} para subir`;
+    return `* ${client.name} (Código: ${client.clientCode})\n  └ 🏷️ Exhibidor: ${client.exhibidor}\n  └ 📅 ${client.day} | 🎨 ${emoji} ${client.color} (${client.packs} Packs)\n  └ 🚀 Falta: ${client.falta} para subir`;
 };
 
-const buildPaginatedResponse = (items: string[], startIndex: number) => {
-    const pageSize = 10;
+const buildPaginatedResponse = (items: string[], startIndex: number, customPageSize?: number) => {
+    const pageSize = customPageSize || 10;
     const slice = items.slice(startIndex, startIndex + pageSize);
     const nextIndex = startIndex + slice.length;
     const hasMore = nextIndex < items.length;
@@ -186,7 +171,7 @@ const buildPaginatedResponse = (items: string[], startIndex: number) => {
     };
 };
 
-export async function processUserQuery(userId: string, query: string, userName: string): Promise<string> {
+export async function processUserQuery(userId: string, query: string, userName: string, isAudio: boolean = false): Promise<string> {
     console.log(`[AI-AGENT] Processing query for ${userName} (${userId}): "${query}"`);
     try {
         // 1. Get User Route
@@ -286,7 +271,7 @@ export async function processUserQuery(userId: string, query: string, userName: 
         if (isMoreQuery(normalizedQuery)) {
             const state = paginationState.get(userId);
             if (state && state.items.length > 0) {
-                const page = buildPaginatedResponse(state.items, state.index);
+                const page = buildPaginatedResponse(state.items, state.index, 10); // Default 10 for "ver más"
                 state.index = page.nextIndex;
                 paginationState.set(userId, state);
                 if (!page.hasMore) {
@@ -297,11 +282,26 @@ export async function processUserQuery(userId: string, query: string, userName: 
             return "No hay más clientes en la lista actual. ¡MondiChat te acompaña en tu ruta! 🚀";
         }
 
-        const listRequested = isListIntent(normalizedQuery);
+        const listRequested = !isAudio && isListIntent(normalizedQuery);
         const dayFilter = resolveDayFilter(normalizedQuery);
         const colorFilter = resolveColorFilter(normalizedQuery);
 
-        if (listRequested || dayFilter || colorFilter) {
+        // Check for requested quantity (e.g. "2 clientes", "5 primeros", "dos clientes")
+        const quantityMatchDigit = normalizedQuery.match(/(\d+)\s+(?:clientes|registros|primeros|ultimos)/);
+        let requestedQuantity = (quantityMatchDigit && quantityMatchDigit[1]) ? parseInt(quantityMatchDigit[1], 10) : null;
+
+        if (!requestedQuantity) {
+             const wordToNum: Record<string, number> = {
+                 "un": 1, "uno": 1, "una": 1, "dos": 2, "tres": 3, "cuatro": 4, 
+                 "cinco": 5, "seis": 6, "siete": 7, "ocho": 8, "nueve": 9, "diez": 10
+             };
+             const quantityMatchWord = normalizedQuery.match(/(un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s+(?:clientes|registros|primeros|ultimos)/);
+             if (quantityMatchWord && quantityMatchWord[1]) {
+                 requestedQuantity = wordToNum[quantityMatchWord[1]] || null;
+             }
+        }
+
+        if (listRequested || (dayFilter && !isAudio) || (colorFilter && !isAudio)) {
             const filtered = clientSummaries.filter(summary => {
                 const dayMatch = dayFilter ? normalizeText(summary.fullDay).includes(dayFilter) : true;
                 const colorMatch = colorFilter ? summary.color === colorFilter : true;
@@ -319,12 +319,17 @@ export async function processUserQuery(userId: string, query: string, userName: 
                     exhibidor: summary.exhibidorText,
                     color: summary.color,
                     packs: summary.packsText,
-                    falta: summary.faltaDisplay
+                    falta: summary.faltaDisplay,
+                    clientCode: summary.clientCode
                 })
             );
 
+            // If a specific quantity was requested, use it as the page size for the first page
+            // OR simply slice the items if they just want "top N"
+            const pageSize = requestedQuantity || 10;
+
             paginationState.set(userId, { items, index: 0 });
-            const page = buildPaginatedResponse(items, 0);
+            const page = buildPaginatedResponse(items, 0, pageSize);
             paginationState.set(userId, { items, index: page.nextIndex });
             if (!page.hasMore) {
                 paginationState.delete(userId);

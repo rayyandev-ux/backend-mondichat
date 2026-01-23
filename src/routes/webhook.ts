@@ -151,8 +151,8 @@ export async function webhookRoutes(server: FastifyInstance) {
 
       if (user) {
         // Forward to AI Agent for RAG/Query
-        request.log.info({ msg: 'Forwarding to AI Agent', userId: user.id, query: text });
-        const response = await processUserQuery(user.id, text, user.name || 'Vendedor');
+        request.log.info({ msg: 'Forwarding to AI Agent', userId: user.id, query: text, isAudio });
+        const response = await processUserQuery(user.id, text, user.name || 'Vendedor', isAudio);
         await sendWazendMessage(phoneNumber, response);
         if (reactionSent) {
           await applyReaction("🍪");
